@@ -64,6 +64,8 @@ $Config = @{
     Threads            = 32
     PreserveACL         = $true
     BandwidthThrottle   = 0    # Milliseconds between packets (0 = no throttle)
+    
+    # Retry settings for different path types
     RetryCount         = 7     # Number of retries for failed copies (local paths)
     RetryWaitSec      = 10    # Seconds to wait between retries (local paths)
     NetworkRetries    = 500    # Higher retry count for network paths
@@ -74,7 +76,6 @@ $Config = @{
     MaxRetryWaitSec   = 30     # Maximum wait time for local paths
     MaxNetworkRetries = 5000   # Maximum retries for network paths
     MaxNetworkWaitSec = 120    # Maximum wait time for network paths
-}
     
     # Excludes (leave empty arrays if none)
     ExcludeDirs         = @()  # e.g., @('Temp', '~snapshot', '.recycle')
@@ -85,22 +86,23 @@ $Config = @{
     SmtpServer          = 'smtp.company.com'
     EmailFrom           = 'migrations@company.com'
     EmailTo             = @('admin@company.com')
+    
     # Optional SMTP settings
     SmtpPort            = 25
     SmtpUseSsl          = $false
-    # Preferred: supply a PSCredential object at runtime to avoid storing secrets in the file
     SmtpCredential      = $null  # e.g., Get-Credential
-    # Alternatively (less secure): provide SmtpUser and SmtpPassword
-    SmtpUser            = $null
-    SmtpPassword        = $null
+    SmtpUser            = $null  # Alternative to SmtpCredential
+    SmtpPassword        = $null  # Alternative to SmtpCredential
     EmailOnSuccess      = $true
     EmailOnFailure      = $true
+    
     # Logging and copy behavior
     AppendLogs          = $false  # if true, use /LOG+: to append to a single log file
     ForceBackup         = $false  # if true, use /B (backup mode) instead of /ZB
-    # Watchdog: abort and optionally retry when robocopy is idle for too long (minutes)
+    
+    # Watchdog settings
     WatchdogEnabled     = $true
-    WatchdogTimeoutMin  = 15
+    WatchdogTimeoutMin  = 15     # Minutes before timeout
 }
 
 # =========================================
