@@ -11,6 +11,29 @@
     Run in dry-run mode (list only, no changes)
 .PARAMETER Confirm
     Required for MIRROR execution
+.NOTES
+    Retry Configuration:
+    The script automatically adjusts retry settings based on whether paths are local or network (UNC):
+
+    Local Paths (C:\, D:\, etc.):
+    - RetryCount: Default 5 retries
+    - RetryWaitSec: Default 5 seconds between retries
+    
+    Network Paths (\\server\share):
+    - NetworkRetries: Default 1000 retries
+    - NetworkWaitSec: Default 30 seconds between retries
+
+    These values can be adjusted in the $Config hashtable:
+    $Config.RetryCount = 10        # Increase local path retries
+    $Config.RetryWaitSec = 10      # Increase local path wait time
+    $Config.NetworkRetries = 500    # Adjust network retries
+    $Config.NetworkWaitSec = 15     # Adjust network wait time
+
+    Recommended Values:
+    - Local paths: 5-10 retries, 5-15 seconds wait
+    - Network paths: 100-1000 retries, 15-30 seconds wait
+    - High-latency networks may benefit from longer wait times
+    - Critical transfers may warrant higher retry counts
 .EXAMPLE
     .\Migrate.ps1 -Mode SEED
     .\Migrate.ps1 -Mode SYNC -Preview
@@ -35,12 +58,23 @@ param(
 # CONFIGURATION
 # =========================================
 $Config = @{
-    Source              = 'C:\RC-Source'
-    Destination         = 'C:\RC-Destination'
-    LogRoot             = 'C:\Logs\RC_Test'
-    Threads             = 32
+    Source              = '\\fs\Quickbooks\iPower Test'
+    Destination         = '\\KF-DC\Quickbooks\iPower Test'
+    LogRoot            = 'C:\Logs\iPower Test'
+    Threads            = 32
     PreserveACL         = $true
-    BandwidthThrottle   = 0  # Milliseconds between packets (0 = no throttle)
+    BandwidthThrottle   = 0    # Milliseconds between packets (0 = no throttle)
+    RetryCount         = 7     # Number of retries for failed copies (local paths)
+    RetryWaitSec      = 10    # Seconds to wait between retries (local paths)
+    NetworkRetries    = 500    # Higher retry count for network paths
+    NetworkWaitSec    = 20     # Longer wait time for network paths
+    
+    # Retry Limits (used for validation)
+    MaxRetryCount     = 100    # Maximum retries for local paths
+    MaxRetryWaitSec   = 30     # Maximum wait time for local paths
+    MaxNetworkRetries = 5000   # Maximum retries for network paths
+    MaxNetworkWaitSec = 120    # Maximum wait time for network paths
+}
     
     # Excludes (leave empty arrays if none)
     ExcludeDirs         = @()  # e.g., @('Temp', '~snapshot', '.recycle')
@@ -121,8 +155,50 @@ function Write-Status {
     Write-Host $Message -ForegroundColor $colors[$Level]
 }
 
+function Test-RetrySettings {
+    # Validate and adjust retry settings if needed
+    if ($Config.RetryCount -lt 1) {
+        Write-Status "RetryCount adjusted to minimum value of 1" -Level Warning
+        $Config.RetryCount = 1
+    }
+    elseif ($Config.RetryCount -gt $Config.MaxRetryCount) {
+        Write-Status "RetryCount reduced to maximum allowed value of $($Config.MaxRetryCount)" -Level Warning
+        $Config.RetryCount = $Config.MaxRetryCount
+    }
+
+    if ($Config.RetryWaitSec -lt 1) {
+        Write-Status "RetryWaitSec adjusted to minimum value of 1" -Level Warning
+        $Config.RetryWaitSec = 1
+    }
+    elseif ($Config.RetryWaitSec -gt $Config.MaxRetryWaitSec) {
+        Write-Status "RetryWaitSec reduced to maximum allowed value of $($Config.MaxRetryWaitSec)" -Level Warning
+        $Config.RetryWaitSec = $Config.MaxRetryWaitSec
+    }
+
+    if ($Config.NetworkRetries -lt $Config.RetryCount) {
+        Write-Status "NetworkRetries adjusted to match RetryCount minimum" -Level Warning
+        $Config.NetworkRetries = $Config.RetryCount
+    }
+    elseif ($Config.NetworkRetries -gt $Config.MaxNetworkRetries) {
+        Write-Status "NetworkRetries reduced to maximum allowed value of $($Config.MaxNetworkRetries)" -Level Warning
+        $Config.NetworkRetries = $Config.MaxNetworkRetries
+    }
+
+    if ($Config.NetworkWaitSec -lt $Config.RetryWaitSec) {
+        Write-Status "NetworkWaitSec adjusted to match RetryWaitSec minimum" -Level Warning
+        $Config.NetworkWaitSec = $Config.RetryWaitSec
+    }
+    elseif ($Config.NetworkWaitSec -gt $Config.MaxNetworkWaitSec) {
+        Write-Status "NetworkWaitSec reduced to maximum allowed value of $($Config.MaxNetworkWaitSec)" -Level Warning
+        $Config.NetworkWaitSec = $Config.MaxNetworkWaitSec
+    }
+}
+
 function Test-Prerequisites {
     Write-Status "Validating prerequisites..." -Level Info
+    
+    # Validate retry settings
+    Test-RetrySettings
     
     # Check elevation
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -130,12 +206,50 @@ function Test-Prerequisites {
         Write-Status "Not running as Administrator - backup mode may be limited" -Level Warning
     }
     
-    # Check paths
-    if (-not (Test-Path $Config.Source)) {
+    # Check paths and normalize them
+    $Config.Source = $Config.Source.TrimEnd('\')
+    $Config.Destination = $Config.Destination.TrimEnd('\')
+    
+    # For UNC paths, ensure network connectivity
+    if ($Config.Source -match '^\\\\') {
+        try {
+            $sourcePath = [System.Uri]::new($Config.Source.Replace('\', '/'))
+            $sourceHost = $sourcePath.Host
+            if (-not (Test-Connection -ComputerName $sourceHost -Count 1 -Quiet)) {
+                throw "Cannot reach source server: $sourceHost"
+            }
+        }
+        catch {
+            throw "Invalid source UNC path: $($Config.Source)"
+        }
+    }
+    
+    if ($Config.Destination -match '^\\\\') {
+        try {
+            $destPath = [System.Uri]::new($Config.Destination.Replace('\', '/'))
+            $destHost = $destPath.Host
+            if (-not (Test-Connection -ComputerName $destHost -Count 1 -Quiet)) {
+                throw "Cannot reach destination server: $destHost"
+            }
+        }
+        catch {
+            throw "Invalid destination UNC path: $($Config.Destination)"
+        }
+    }
+    
+    # Check path accessibility
+    if (-not (Test-Path $Config.Source -ErrorAction SilentlyContinue)) {
         throw "Source path not accessible: $($Config.Source)"
     }
-    if (-not (Test-Path $Config.Destination)) {
-        throw "Destination path not accessible: $($Config.Destination)"
+    if (-not (Test-Path $Config.Destination -ErrorAction SilentlyContinue)) {
+        Write-Status "Destination path does not exist: $($Config.Destination)" -Level Warning
+        try {
+            New-Item -ItemType Directory -Path $Config.Destination -Force -ErrorAction Stop | Out-Null
+            Write-Status "Created destination directory" -Level Success
+        }
+        catch {
+            throw "Cannot create destination path: $($Config.Destination). Error: $_"
+        }
     }
     
     # Test write access
@@ -179,12 +293,27 @@ function Build-RobocopyParams {
         [bool]$ForceBackup = $false
     )
     
+    # Handle paths with spaces by adding quotes if needed
+    $sourcePath = if ($Source -match '\s') { "`"$Source`"" } else { $Source }
+    $destPath = if ($Dest -match '\s') { "`"$Dest`"" } else { $Dest }
+    
+    # Ensure paths are properly formatted
+    $sourcePath = $sourcePath.TrimEnd('\')
+    $destPath = $destPath.TrimEnd('\')
+    
+    # Determine if we're dealing with network paths
+    $isNetworkPath = $Source -match '^\\\\' -or $Dest -match '^\\\\' 
+    
+    # Use appropriate retry settings based on path type
+    $retryCount = if ($isNetworkPath) { $Config.NetworkRetries } else { $Config.RetryCount }
+    $retryWait = if ($isNetworkPath) { $Config.NetworkWaitSec } else { $Config.RetryWaitSec }
+    
     $rcParams = @(
-        $Source,
-        $Dest,
+        $sourcePath,
+        $destPath,
         '/E',           # Copy subdirectories including empty
-        '/R:5',         # Retry 5 times
-        '/W:5',         # Wait 5 seconds between retries
+        "/R:$retryCount",   # Retry count based on path type
+        "/W:$retryWait",    # Wait time based on path type
         '/FFT',         # FAT file time tolerance
     '/FP',          # include full path names
         '/XJ',          # Exclude junction points
