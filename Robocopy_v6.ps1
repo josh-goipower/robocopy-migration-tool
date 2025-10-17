@@ -110,8 +110,13 @@ $Config = @{
 # =========================================
 $ErrorActionPreference = 'Stop'
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+
+# Ensure log paths are properly formatted
+$Config.LogRoot = $Config.LogRoot.TrimEnd('\')
 $LogDir = Join-Path $Config.LogRoot $Timestamp
 $StateFile = Join-Path $Config.LogRoot 'migration_state.json'
+
+Write-Status "Initializing with log directory: $LogDir" -Level Info
 
 # Ensure script runs only on Windows (robocopy and Windows ACLs are Windows-specific)
 if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
@@ -119,12 +124,21 @@ if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
     exit 2
 }
 
-# Create log directory
-if (-not (Test-Path $Config.LogRoot)) {
-    New-Item -ItemType Directory -Path $Config.LogRoot -Force | Out-Null
+# Create log directory structure
+try {
+    if (-not (Test-Path $Config.LogRoot)) {
+        New-Item -ItemType Directory -Path $Config.LogRoot -Force | Out-Null
+        Write-Status "Created log root directory: $($Config.LogRoot)" -Level Info
+    }
+    
+    if (-not (Test-Path $LogDir)) {
+        New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction Stop | Out-Null
+        Write-Status "Created log directory: $LogDir" -Level Info
+    }
 }
-if (-not (Test-Path $LogDir)) {
-    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+catch {
+    Write-Status "Failed to create log directory structure: $_" -Level Error
+    throw "Cannot create required log directories. Ensure you have write permissions to $($Config.LogRoot)"
 }
 
 # =========================================
